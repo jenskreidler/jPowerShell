@@ -1,16 +1,20 @@
 package com.profesorfalken.jpowershell;
 
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.FileWriter;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import org.junit.Assert;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.ExpectedException;
 
 /**
  * Tests for jPowerShell
@@ -19,7 +23,7 @@ import java.util.logging.Logger;
  */
 public class PowerShellTest {
 
-    private static final String CRLF = "\r\n";
+    private static final String CRLF = System.lineSeparator();
 
     @Rule
     public final ExpectedException exception = ExpectedException.none();
@@ -121,13 +125,16 @@ public class PowerShellTest {
     public void testLongCommand() {
         System.out.println("testLongCommand");
         if (OSDetector.isWindows()) {
-            PowerShell powerShell = PowerShell.openSession();
+            PowerShell powerShell = PowerShell.openSession().configuration(Map.of("maxWait", "20000"));
             PowerShellResponse response = powerShell
                     .executeCommand("Get-WMIObject -List | Where{$_.name -match \"^Win32_\"} | Sort Name");
             System.out.println("Long list:" + response.getCommandOutput());
 
-            Assert.assertFalse(powerShell.isLastCommandInError());
+            Assert.assertFalse("Is timeout!", response.isTimeout());
+            Assert.assertFalse("Is error!", response.isError());
+
             Assert.assertTrue(response.getCommandOutput().length() > 1000);
+            Assert.assertFalse(powerShell.isLastCommandInError());
 
             powerShell.close();
         }
@@ -436,8 +443,8 @@ public class PowerShellTest {
 
             Assert.assertNotNull("Response null!", response);
             if (!response.getCommandOutput().contains("UnauthorizedAccess")) {
-                Assert.assertFalse("Is in error!", response.isError());
                 Assert.assertFalse("Is timeout!", response.isTimeout());
+                Assert.assertFalse("Is in error!", response.isError());
             }
             System.out.println(response.getCommandOutput());
         }

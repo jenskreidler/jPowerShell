@@ -23,11 +23,13 @@ package com.profesorfalken.jpowershell;
  */
 public class PowerShellNotAvailableException extends RuntimeException {
 
-    PowerShellNotAvailableException(String message) {
+    private static final long serialVersionUID = -7507735313161807444L;
+
+    public PowerShellNotAvailableException(String message) {
         super(message);
     }
 
-    PowerShellNotAvailableException(String message, Throwable cause) {
+    public PowerShellNotAvailableException(String message, Throwable cause) {
         super(message, cause);
     }
 }

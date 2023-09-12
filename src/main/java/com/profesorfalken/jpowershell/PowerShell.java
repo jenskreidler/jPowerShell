@@ -15,11 +15,25 @@
  */
 package com.profesorfalken.jpowershell;
 
-import java.io.*;
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.nio.charset.Charset;
 import java.util.Date;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -36,13 +50,15 @@ import java.util.logging.Logger;
  */
 public class PowerShell implements AutoCloseable {
 
-    //Declare logger
+    // Declare logger
     private static final Logger logger = Logger.getLogger(PowerShell.class.getName());
 
     // Process to store PowerShell session
     private Process p;
-    //PID of the process
+
+    // PID of the process
     private long pid = -1;
+
     // Writer to send commands
     private PrintWriter commandWriter;
 
@@ -50,17 +66,16 @@ public class PowerShell implements AutoCloseable {
     private boolean closed = false;
     private ExecutorService threadpool;
 
-    //Default PowerShell executable path
-    private static final String DEFAULT_WIN_EXECUTABLE = "powershell.exe";
-    private static final String DEFAULT_LINUX_EXECUTABLE = "powershell";
+    // Default PowerShell executable path
+    private static final String DEFAULT_WIN_EXECUTABLE = System.getProperty("psExecutable", "powershell.exe");
+    private static final String DEFAULT_LINUX_EXECUTABLE = System.getProperty("psExecutable", "pwsh");
 
     // Config values
-    private int waitPause = 5;
+    private int waitPause = 10;
     private long maxWait = 10000;
     private File tempFolder = null;
 
     // Variables used for script mode
-    private boolean scriptMode = false;
     public static final String END_SCRIPT_STRING = "--END-JPOWERSHELL-SCRIPT--";
 
     // Private constructor. Instance using openSession method
@@ -137,7 +152,7 @@ public class PowerShell implements AutoCloseable {
         String codePage = PowerShellCodepage.getIdentifierByCodePageName(Charset.defaultCharset().name());
         ProcessBuilder pb;
 
-        //Start powershell executable in process
+        // Start powershell executable in process
         if (OSDetector.isWindows()) {
             pb = new ProcessBuilder("cmd.exe", "/c", "chcp", codePage, ">", "NUL", "&", powerShellExecutablePath,
                     "-ExecutionPolicy", "Bypass", "-NoExit", "-NoProfile", "-Command", "-");
@@ -149,7 +164,7 @@ public class PowerShell implements AutoCloseable {
         pb.redirectErrorStream(true);
 
         try {
-            //Launch process
+            // Launch process
             p = pb.start();
 
             if (p.waitFor(5, TimeUnit.SECONDS) && !p.isAlive()) {
@@ -161,18 +176,17 @@ public class PowerShell implements AutoCloseable {
                     "Cannot execute PowerShell. Please make sure that it is installed in your system", ex);
         }
 
-        //Prepare writer that will be used to send commands to powershell
+        // Prepare writer that will be used to send commands to powershell
         this.commandWriter = new PrintWriter(new OutputStreamWriter(new BufferedOutputStream(p.getOutputStream())), true);
 
         // Init thread pool. 2 threads are needed: one to write and read console and the other to close it
         this.threadpool = Executors.newFixedThreadPool(2);
 
-        //Get and store the PID of the process
-        this.pid = getPID();
+        // Get and store the PID of the process
+        this.pid = p.pid();
 
         return this;
     }
-
 
     /**
      * Execute a PowerShell command.
@@ -184,14 +198,30 @@ public class PowerShell implements AutoCloseable {
      * @return PowerShellResponse the information returned by powerShell
      */
     public PowerShellResponse executeCommand(String command) {
+        return executeCommand(command, false);
+    }
+
+    /**
+     * Execute a PowerShell command.
+     * <p>
+     * This method launch a thread which will be executed in the already created
+     * PowerShell console context
+     *
+     * @param command the command to call. Ex: dir
+     * @param scriptMode if the command is a script specification (absolute file path plus params)
+     * @return PowerShellResponse the information returned by powerShell
+     */
+    public PowerShellResponse executeCommand(String command, boolean scriptMode) {
         String commandOutput = "";
         boolean isError = false;
         boolean timeout = false;
 
         checkState();
 
-        PowerShellCommandProcessor commandProcessor = new PowerShellCommandProcessor("standard", p.getInputStream(),
-                this.waitPause, this.scriptMode);
+        PowerShellCommandProcessor commandProcessor = scriptMode
+                ? new PowerShellScriptProcessor(p.getInputStream(), this.waitPause)
+                : new PowerShellCommandProcessor(p.getInputStream(), this.waitPause);
+
         Future<String> result = threadpool.submit(commandProcessor);
 
         // Launch command
@@ -204,7 +234,7 @@ public class PowerShell implements AutoCloseable {
                 } catch (TimeoutException timeoutEx) {
                     timeout = true;
                     isError = true;
-                    //Interrupt command after timeout
+                    // Interrupt command after timeout
                     result.cancel(true);
                 }
             }
@@ -231,7 +261,7 @@ public class PowerShell implements AutoCloseable {
         PowerShellResponse response = null;
 
         try (PowerShell session = PowerShell.openSession()) {
-            response = session.executeCommand(command);
+            response = session.executeCommand(command, false);
         } catch (PowerShellNotAvailableException ex) {
             logger.log(Level.SEVERE, "PowerShell not available", ex);
         }
@@ -249,7 +279,7 @@ public class PowerShell implements AutoCloseable {
      * @return The {@link PowerShell} instance
      */
     public PowerShell executeCommandAndChain(String command, PowerShellResponseHandler... response) {
-        PowerShellResponse powerShellResponse = executeCommand(command);
+        PowerShellResponse powerShellResponse = executeCommand(command, false);
 
         if (response.length > 0) {
             handleResponse(response[0], powerShellResponse);
@@ -273,7 +303,7 @@ public class PowerShell implements AutoCloseable {
      * @return boolean
      */
     public boolean isLastCommandInError() {
-        return !Boolean.valueOf(executeCommand("$?").getCommandOutput());
+        return !Boolean.valueOf(executeCommand("$?", false).getCommandOutput());
     }
 
     /**
@@ -334,9 +364,7 @@ public class PowerShell implements AutoCloseable {
         if (srcReader != null) {
             File tmpFile = createWriteTempFile(srcReader);
             if (tmpFile != null) {
-                this.scriptMode = true;
-                response = executeCommand(tmpFile.getAbsolutePath() + " " + params);
-                this.scriptMode = false;
+                response = executeCommand(tmpFile.getAbsolutePath() + " " + params, true);
                 tmpFile.delete();
             } else {
                 response = new PowerShellResponse(true, "Cannot create temp script file!", false);
@@ -460,20 +488,6 @@ public class PowerShell implements AutoCloseable {
         if (this.closed) {
             throw new IllegalStateException("PowerShell is already closed. Please open a new session.");
         }
-    }
-
-    //Use Powershell command '$PID' in order to recover the process identifier
-    private long getPID() {
-        String commandOutput = executeCommand("$pid").getCommandOutput();
-
-        //Remove all non numeric characters
-        commandOutput = commandOutput.replaceAll("\\D", "");
-
-        if (!commandOutput.isEmpty()) {
-            return Long.valueOf(commandOutput);
-        }
-
-        return -1;
     }
 
     //Return the temp folder File object or null if the path does not exist
